@@ -1,4 +1,7 @@
-﻿Import-Module SQLPS -DisableNameChecking
+﻿param (
+    [boolean]$upgradeOnly = $True
+ )
+Import-Module SQLPS -DisableNameChecking
 
 function Get-IniContent ($filePath)
 {#read an ini file and returns the content as an array
@@ -26,6 +29,9 @@ function Get-IniContent ($filePath)
     }
     return $ini
 }
+
+
+
 function Get-Script-Directory 
 { 
 $scriptInvocation = (Get-Variable MyInvocation -Scope 1).Value 
@@ -34,53 +40,87 @@ return Split-Path $scriptInvocation.MyCommand.Path
 $scriptDirectory = Get-Script-Directory 
 #load config.ini
 $iniContent = Get-IniContent "$scriptDirectory\config.ini"
-$objProperties = $iniContent["databases"].Properties;
 $databases = @{}
-
-
-foreach( $key in $iniContent["databases"].Keys)
-{
-    
-    $databases[$key]="";
-    foreach($key2 in $iniContent["scripts"].Keys)
-    {
-        if($iniContent["databases"][$key] -eq $key2)
-        {
-            $databases[$key]=$iniContent["scripts"][$key2]
-        }
-    }
-    
-}
-
 $SQLServer = $iniContent["settings"]["server"]
 $user =$iniContent["settings"]["user"]
 $password = $iniContent["settings"]["password"]
 
-Write-Output "Start dropping databases"
-foreach($key in $databases.Keys)
+function Exists($databaseName)
 {
-    $result=$null;
-    $result=invoke-sqlcmd -ServerInstance "$SQLServer" -Username "$user" -Password "$password" -Query  "SELECT name FROM master.sys.databases WHERE name = N'$key' ;"
+   $result=$null;
+    $result=invoke-sqlcmd -ServerInstance "$SQLServer" -Username "$user" -Password "$password" -Query  "SELECT name FROM master.sys.databases WHERE name = N'$databaseName' ;"
     if(!$result)
     {
-        Write-Output "$key does not exist"
+        return $False
+    }
+    return $True
+}
+
+foreach( $key in $iniContent.Keys)
+{
+    if($key -like "database*")
+    {
+        $databases[$key]=$iniContent[$key];
+        foreach($key2 in $iniContent["scripts"].Keys)
+        {
+            if($iniContent[$key]["type"] -eq $key2)
+            {
+                $databases[$key]["script"]=$iniContent["settings"]["scriptPath"]+"\"+$iniContent["scripts"][$key2]
+            }
+        }
+        $databases[$key]["backup"]=$iniContent["settings"]["backupPath"]+"\"+$iniContent[$key]["backup"]
+    }
+}
+$result=$databases["database1"];
+
+
+
+if(!$upgradeOnly)
+{
+Write-Output "Start dropping databases"
+
+foreach($key in $databases.Keys)
+{
+    $name=$databases[$key]["name"]
+ 
+    if(Exists($name))
+    {
+        Write-Output "Dropping $name"
+        Invoke-Sqlcmd -ServerInstance "$SQLServer" -Username "$user" -Password "$password" -Query "DECLARE @kill varchar(8000) = '';  SELECT @kill = @kill + 'kill ' + CONVERT(varchar(5), session_id) + ';'  FROM sys.dm_exec_sessions WHERE database_id  = db_id('$name') EXEC(@kill);"
+        invoke-sqlcmd  -ServerInstance "$SQLServer" -Username "$user" -Password "$password" -Query "Drop database [$name];"
+        
     }
     else
     {
-    Write-Output "Dropping $key"
-    invoke-sqlcmd -Query "Drop database [$key];"
+        Write-Output "$name does not exist"
     }
 }
-#$SqlConnection = New-Object System.Data.SqlClient.SqlConnection
-#$SqlConnection.ConnectionString = "Server = $SQLServer; Integrated Security = True; User ID = $user; Password = $password;"
-#$SqlCmd = New-Object System.Data.SqlClient.SqlCommand
-#$SqlCmd.Connection = $SqlConnection
-#$SqlAdapter = New-Object System.Data.SqlClient.SqlDataAdapter
-#$SqlAdapter.SelectCommand = $SqlCmd
-#$DataSet = New-Object System.Data.DataSet
+
+Write-Output "Start restoring databases"
+foreach($key in $databases.Keys)
+{    
+    $name=$databases[$key]["name"]
+    $backup=$databases[$key]["backup"]
+    Write-Output "Restoring $name"
+    invoke-SqlCmd -ServerInstance "$SQLServer" -Username "$user" -Password "$password"  -querytimeout 0 –Query “RESTORE DATABASE [$name] FROM DISK='$backup'”
+}
+}
+Write-Output "Start applying update scripts"
+foreach($key in $databases.Keys)
+{    
+    $name=$databases[$key]["name"]
+    if(Exists($name))
+    {
+        $script=$databases[$key]["script"]
+        Write-Output "Applying $script to $name"
+        invoke-SqlCmd -ServerInstance "$SQLServer" -database "$name" -Username "$user" -Password "$password" –InputFile "$script"
+        
+    }
+    else
+    {
+        Write-Output "$name does not exist"
+    }
+}
 
 
-$second = $databases;
-
-$first = $iniContent[1];
 
